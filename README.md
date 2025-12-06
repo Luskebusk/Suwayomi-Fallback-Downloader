@@ -16,7 +16,9 @@ This ensures seamless integration - all your manga chapters stay organized under
 
 ## Comments
 
-This was made mostly for personal use and i do not know if there is a better solution to this issue. Was just annoyed of a lot of downloads failing and having to go back and restart them. (If they got cancelled by rate limiting etc etc). Sharing just in case any one else has the same issue. Made in collaboration with AI. Tested and working on Suwayomi build: v2.1.2019
+This was made mostly for personal use and i do not know if there is a better solution to this issue. Was just annoyed of a lot of downloads failing because of ratelimiting. Sharing just in case any one else has the same issue. 
+Made in collaboration with AI. 
+Tested and working on Suwayomi build: v2.1.2019
 
 ## Installation
 
