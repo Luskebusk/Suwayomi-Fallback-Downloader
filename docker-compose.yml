@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  suwayomi-fallback-downloader:
+    build: .
+    container_name: suwayomi-fallback-downloader
+    restart: unless-stopped
+    environment:
+      # Suwayomi connection settings
+      SUWAYOMI_URL: "http://suwayomi:4567/api/graphql"  # Change to your Suwayomi container name/IP
+      SUWAYOMI_USER: "username"  # Your Suwayomi username (if authentication is enabled)
+      SUWAYOMI_PASS: "password"  # Your Suwayomi password (if authentication is enabled)
+      
+      # File system settings
+      DOWNLOADS_PATH: "/downloads/mangas"  # Path inside container (should match Suwayomi's download path)
+      CHOWN_UID: "1000"  # User ID for file ownership (run 'id -u' on host to find yours)
+      CHOWN_GID: "1000"  # Group ID for file ownership (run 'id -g' on host to find yours)
+      
+      # Monitoring settings
+      CHECK_INTERVAL: "60"  # How often to check for failed downloads (in seconds)
+    
+    volumes:
+      # Mount the same downloads folder that Suwayomi uses
+      - /path/to/your/suwayomi/downloads:/downloads/mangas
+    
+    # Optional: Connect to the same network as Suwayomi
+    # networks:
+    #   - suwayomi_network
+
+# networks:
+#   suwayomi_network:
+#     external: true
