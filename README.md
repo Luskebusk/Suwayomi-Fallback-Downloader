@@ -78,7 +78,3 @@ This was made mostly for personal use to solve persistent download failures due 
 Tested and working on Suwayomi build: **v2.1.2019**
 
 **Current Version:** v1.1.0 (includes parallel download support)
-
-## License
-
-MIT License - See [LICENSE](LICENSE) file for details.
