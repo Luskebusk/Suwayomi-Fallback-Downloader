@@ -4,7 +4,7 @@ Suwayomi Fallback Downloader
 Monitors download queue for failures and attempts to download from alternative sources.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import os
 import shutil
@@ -81,11 +81,11 @@ if custom_patterns:
             prefix = parts[1].strip()
             transform_type = parts[2].strip() if len(parts) > 2 else "none"
             
-            # Define transform based on type
+            # Define transform based on type (capture value with default arg)
             if transform_type == "colon_to_underscore":
-                transform = lambda name: name.replace(":", "_")
+                transform = lambda name, tt=transform_type: name.replace(":", "_")
             else:
-                transform = lambda name: name
+                transform = lambda name, tt=transform_type: name
             
             SOURCE_FILENAME_PATTERNS[source_id] = {
                 "prefix": prefix,
@@ -130,13 +130,25 @@ def check_for_updates() -> None:
             latest_version = data.get("tag_name", "").lstrip("v")
             current_version = __version__
             
-            if latest_version and latest_version != current_version:
-                logger.warning("=" * 60)
-                logger.warning(f"UPDATE AVAILABLE: v{latest_version} (current: v{current_version})")
-                logger.warning(f"Download: {data.get('html_url', 'https://github.com/Luskebusk/Suwayomi-Fallback-Downloader/releases')}")
-                logger.warning("=" * 60)
-            else:
-                logger.info(f"Running latest version: v{current_version}")
+            # Compare versions as tuples for proper semantic versioning
+            if latest_version:
+                try:
+                    latest_tuple = tuple(int(x) for x in latest_version.split("."))
+                    current_tuple = tuple(int(x) for x in current_version.split("."))
+                    
+                    if latest_tuple > current_tuple:
+                        logger.warning("=" * 60)
+                        logger.warning(f"UPDATE AVAILABLE: v{latest_version} (current: v{current_version})")
+                        logger.warning(f"Download: {data.get('html_url', 'https://github.com/Luskebusk/Suwayomi-Fallback-Downloader/releases')}")
+                        logger.warning("=" * 60)
+                    else:
+                        logger.info(f"Running latest version: v{current_version}")
+                except (ValueError, AttributeError):
+                    # Fallback to string comparison if parsing fails
+                    if latest_version != current_version:
+                        logger.warning(f"Version check: latest={latest_version}, current={current_version}")
+                    else:
+                        logger.info(f"Running latest version: v{current_version}")
     except Exception as e:
         logger.debug(f"Could not check for updates: {e}")
 
@@ -497,7 +509,7 @@ def check_active_downloads() -> dict:
     for chapter_id, info in list(_active_fallback_downloads.items()):
         # Check for timeout
         if current_time - info["start_time"] > DOWNLOAD_WAIT_TIMEOUT:
-            logger.warning(f"    Fallback download timeout for chapter {chapter_id}")
+            logger.warning(f"    Fallback download timeout for chapter {chapter_id} ({info['original_manga_title']} - {info['original_chapter_name']})")
             timed_out.append(chapter_id)
             continue
 
@@ -510,7 +522,7 @@ def check_active_downloads() -> dict:
         elif status["state"] == "FINISHED":
             completed[chapter_id] = info
         elif status["state"] == "ERROR":
-            logger.warning(f"    Fallback download failed for chapter {chapter_id}")
+            logger.warning(f"    Fallback download failed for chapter {chapter_id} ({info['original_manga_title']} - {info['original_chapter_name']})")
             timed_out.append(chapter_id)
 
     # Clean up completed and failed
@@ -784,9 +796,7 @@ def main():
                 try:
                     finalize_fallback_download(chapter_id, info)
                 except Exception as e:
-                    logger.error(f"Error finalizing download for chapter {chapter_id}: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception(f"Error finalizing download for chapter {chapter_id}: {e}")
 
             # Check for new failures and start fallback downloads if under limit
             if len(_active_fallback_downloads) < MAX_CONCURRENT_FALLBACKS:
@@ -809,24 +819,22 @@ def main():
                             for item in to_process:
                                 failure_key = f"{item['manga']['id']}_{item['chapter']['id']}"
                                 try:
-                                    start_fallback_download(item)
-                                    processed_failures.add(failure_key)
+                                    if start_fallback_download(item):
+                                        processed_failures.add(failure_key)
+                                    else:
+                                        logger.debug(f"Will retry {failure_key} on next iteration")
                                     time.sleep(2)  # Small delay between starts
                                 except Exception as e:
-                                    logger.error(f"Error starting fallback for {item['manga']['title']}: {e}")
-                                    import traceback
-                                    traceback.print_exc()
+                                    logger.exception(f"Error starting fallback for {item['manga']['title']}: {e}")
             else:
-                logger.info(f"Max concurrent fallbacks reached ({len(_active_fallback_downloads)}/{MAX_CONCURRENT_FALLBACKS}), waiting...")
+                logger.debug(f"Max concurrent fallbacks reached ({len(_active_fallback_downloads)}/{MAX_CONCURRENT_FALLBACKS}), skipping new starts")
 
             # Periodic cleanup
             if len(processed_failures) > 1000:
                 processed_failures.clear()
 
         except Exception as e:
-            logger.error(f"Error in main loop: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"Error in main loop: {e}")
 
         time.sleep(CHECK_INTERVAL)
 
