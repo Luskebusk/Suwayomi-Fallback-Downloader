@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📖 Documentation Wiki
+    url: https://github.com/Luskebusk/Suwayomi-Fallback-Downloader/wiki
+    about: Check the Wiki for setup guides, configuration help, and troubleshooting
+  - name: 💬 Discussions
+    url: https://github.com/Luskebusk/Suwayomi-Fallback-Downloader/discussions
+    about: Ask questions, share configurations, or discuss ideas

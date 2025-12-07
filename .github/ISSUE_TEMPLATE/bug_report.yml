@@ -1,0 +1,111 @@
+name: Bug Report
+description: Report a bug or issue with the Suwayomi Fallback Downloader
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this bug! Please fill out the information below to help us diagnose the issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Tell us what went wrong...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Fallback Downloader Version
+      description: What version of the downloader are you using?
+      placeholder: e.g., v1.1.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment Method
+      description: How are you running the downloader?
+      options:
+        - Docker (docker-compose)
+        - Docker (manual)
+        - Python script directly
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: source
+    attributes:
+      label: Manga Source(s)
+      description: Which manga source(s) were involved when the issue occurred? (Leave blank if not applicable)
+      placeholder: e.g., Mangabat, MangaDex, Comick
+    validations:
+      required: false
+
+  - type: input
+    id: extension-repo
+    attributes:
+      label: Extension Repository
+      description: What extension repository URL are you using in Suwayomi? (Leave blank if not applicable)
+      placeholder: e.g., https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: Please copy and paste any relevant log output. This will be automatically formatted.
+      placeholder: |
+        2025-12-07 15:33:13,745 - INFO - Suwayomi Fallback Downloader v1.1.2
+        ...
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Share relevant configuration (remove sensitive information like URLs/passwords)
+      placeholder: |
+        ENABLED_SOURCES: "8,32,56,..."
+        MAX_CONCURRENT_FALLBACKS: "3"
+        MAX_SOURCE_RETRY_LOOPS: "3"
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this issue?
+      placeholder: |
+        1. Set up downloader with sources...
+        2. Try to download chapter from...
+        3. See error...
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context about the problem here (screenshots, related issues, etc.)
+    validations:
+      required: false
