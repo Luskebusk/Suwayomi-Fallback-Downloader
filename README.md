@@ -2,6 +2,8 @@
 
 Automatically recover failed manga chapter downloads in Suwayomi by trying alternative sources.
 
+> **Note:** This script is designed specifically for CBZ format downloads. It only handles `.cbz` files.
+
 ## How It Works
 
 This script monitors your Suwayomi download queue for failed downloads. When a chapter fails to download from its primary source, the script:
