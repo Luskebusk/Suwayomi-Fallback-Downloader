@@ -18,15 +18,55 @@ services:
       
       # Monitoring settings
       CHECK_INTERVAL: "60"  # How often to check for failed downloads (in seconds)
+      MAX_CONCURRENT_FALLBACKS: "3"  # Maximum parallel fallback downloads
+      
+      # ====================================================================
+      # Source Priority - Try sources in this order (most reliable first)
+      # Add/remove/reorder source IDs as needed (comma-separated, no spaces)
+      # ====================================================================
+      SOURCE_PRIORITY: >-
+        2499283573021220255,
+        6247824327199706550,
+        2528986671771677900,
+        4215511432986138970,
+        2,
+        6084907896154116083,
+        7890050626002177109,
+        4972933717624256217
+      # 2499283573021220255 = MangaDex (EN)
+      # 6247824327199706550 = Asura Scans (EN)
+      # 2528986671771677900 = Mangakakalot (EN)
+      # 4215511432986138970 = Mangabat (EN)
+      # 2                   = Mangahere (EN)
+      # 6084907896154116083 = MangaFire (EN)
+      # 7890050626002177109 = Bato.to (EN)
+      # 4972933717624256217 = Comick (EN)
+      
+      # ====================================================================
+      # Filename Patterns - Define how each source names its downloaded files
+      # Format: SOURCE_ID:PREFIX:TRANSFORM_TYPE
+      # - SOURCE_ID: The source ID number
+      # - PREFIX: Text added before chapter name (empty for none)
+      # - TRANSFORM_TYPE: Either "none" or "colon_to_underscore"
+      # ====================================================================
+      SOURCE_FILENAME_PATTERNS: >-
+        4215511432986138970:www.mangabats.com_:none,
+        6084907896154116083::colon_to_underscore,
+        2528986671771677900:www.mangakakalot.gg_:none
+      # 4215511432986138970 = Mangabat    → adds "www.mangabats.com_" prefix
+      # 6084907896154116083 = MangaFire   → no prefix, replaces ":" with "_"
+      # 2528986671771677900 = Mangakakalot → adds "www.mangakakalot.gg_" prefix
     
     volumes:
       # Mount the same downloads folder that Suwayomi uses
       - /path/to/your/suwayomi/downloads:/downloads/mangas
     
-    # Optional: Connect to the same network as Suwayomi
+    # Network configuration (required if using container name in SUWAYOMI_URL)
+    # Uncomment and set to your Suwayomi network name
     # networks:
     #   - suwayomi_network
 
+# Uncomment if connecting to existing Suwayomi network
 # networks:
 #   suwayomi_network:
 #     external: true
