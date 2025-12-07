@@ -69,8 +69,11 @@ CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))  # How often to che
 TITLE_MATCH_THRESHOLD = 0.85  # Minimum similarity score (0-1) to match manga titles
 DOWNLOAD_WAIT_TIMEOUT = 300  # Maximum time to wait for a download to complete (seconds)
 DOWNLOAD_CHECK_INTERVAL = 5  # How often to check download progress (seconds)
+MAX_CONCURRENT_FALLBACKS = int(os.environ.get("MAX_CONCURRENT_FALLBACKS", "3"))  # Max parallel fallback downloads
 
+# ============================================================================
 # END CONFIGURATION
+# ============================================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,6 +84,10 @@ logger = logging.getLogger(__name__)
 # Cache for source names and reverse lookup
 _source_name_cache = {}
 _source_id_by_name_cache = {}
+
+# Active fallback downloads tracking
+# Format: {chapter_id: {"source_id": str, "manga_title": str, "chapter_name": str, "start_time": float, "dest_source_id": str}}
+_active_fallback_downloads = {}
 
 
 def graphql_request(query: str, variables: dict = None) -> dict:
@@ -306,6 +313,34 @@ def enqueue_download(chapter_id: int) -> bool:
         return False
 
 
+def start_download(chapter_id: int) -> bool:
+    """Start downloading a chapter immediately (for parallel downloads)."""
+    query = """
+    mutation START_DOWNLOADS($input: StartDownloadsInput!) {
+        startDownloads(input: $input) {
+            downloadStatus { state }
+        }
+    }
+    """
+    variables = {"input": {"clientMutationId": str(chapter_id)}}
+
+    try:
+        # First enqueue, then start
+        if enqueue_download(chapter_id):
+            # Give a moment for enqueue to register
+            time.sleep(0.5)
+            try:
+                graphql_request(query, variables)
+            except Exception:
+                # START_DOWNLOADS might not exist in all versions, fallback to just enqueue
+                pass
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Failed to start download for chapter {chapter_id}: {e}")
+        return False
+
+
 def dequeue_download(chapter_id: int) -> bool:
     """Remove a chapter from the download queue."""
     query = """
@@ -394,6 +429,47 @@ def wait_for_download(chapter_id: int, timeout: int = DOWNLOAD_WAIT_TIMEOUT) -> 
 
     logger.warning(f"    Download timeout after {timeout}s")
     return False
+
+
+def check_active_downloads() -> dict:
+    """Check status of all active fallback downloads and return completed ones."""
+    if not _active_fallback_downloads:
+        return {}
+
+    queue = get_download_status()
+    queue_by_id = {item["chapter"]["id"]: item for item in queue}
+    
+    completed = {}
+    timed_out = []
+    current_time = time.time()
+
+    for chapter_id, info in list(_active_fallback_downloads.items()):
+        # Check for timeout
+        if current_time - info["start_time"] > DOWNLOAD_WAIT_TIMEOUT:
+            logger.warning(f"    Fallback download timeout for chapter {chapter_id}")
+            timed_out.append(chapter_id)
+            continue
+
+        # Check status in queue
+        status = queue_by_id.get(chapter_id)
+        
+        if status is None:
+            # Not in queue anymore - completed
+            completed[chapter_id] = info
+        elif status["state"] == "FINISHED":
+            completed[chapter_id] = info
+        elif status["state"] == "ERROR":
+            logger.warning(f"    Fallback download failed for chapter {chapter_id}")
+            timed_out.append(chapter_id)
+
+    # Clean up completed and failed
+    for chapter_id in completed:
+        del _active_fallback_downloads[chapter_id]
+    for chapter_id in timed_out:
+        if chapter_id in _active_fallback_downloads:
+            del _active_fallback_downloads[chapter_id]
+
+    return completed
 
 
 def list_existing_manga_folders(manga_title: str) -> list[tuple[str, str, int]]:
@@ -516,8 +592,8 @@ def delete_alt_source_files(source_id: str, manga_title: str) -> bool:
         return False
 
 
-def process_failed_download(failed_item: dict) -> bool:
-    """Try to download a failed chapter from alternative sources."""
+def start_fallback_download(failed_item: dict) -> bool:
+    """Start a fallback download for a failed chapter (non-blocking)."""
     manga_title = failed_item["manga"]["title"]
     failed_source_id = failed_item["manga"]["sourceId"]
     chapter_num = failed_item["chapter"]["chapterNumber"]
@@ -567,77 +643,129 @@ def process_failed_download(failed_item: dict) -> bool:
 
         logger.info(f"    Found chapter: {target_chapter['name']} (ID: {target_chapter['id']})")
 
-        if not enqueue_download(target_chapter["id"]):
+        # Start the download (non-blocking)
+        if not start_download(target_chapter["id"]):
             continue
 
-        logger.info(f"    Download started from {source_name}")
+        # Track this download
+        _active_fallback_downloads[target_chapter["id"]] = {
+            "source_id": source_id,
+            "manga_title": match["title"],
+            "chapter_name": target_chapter["name"],
+            "start_time": time.time(),
+            "dest_source_id": dest_source_id,
+            "original_manga_title": manga_title,
+            "original_chapter_name": chapter_name,
+            "failed_chapter_id": failed_chapter_id,
+        }
 
-        if not wait_for_download(target_chapter["id"]):
-            logger.warning(f"    Download failed from {source_name}")
-            continue
-
-        time.sleep(2)
-
-        alt_manga_title = match["title"]
-        cbz_file = find_cbz_file(source_id, alt_manga_title, target_chapter["name"])
-
-        if not cbz_file:
-            logger.warning(f"    Could not find downloaded CBZ file")
-            continue
-
-        logger.info(f"    Found CBZ: {cbz_file}")
-
-        # Copy into resolved destination source (canonical folder)
-        if not copy_and_rename_cbz(cbz_file, dest_source_id, manga_title, chapter_name):
-            continue
-
-        # Clean up alt source files
-        delete_alt_source_files(source_id, alt_manga_title)
-        delete_downloaded_chapter(target_chapter["id"])
-
-        # Dequeue the failed download and re-enqueue original so Suwayomi marks it downloaded
-        dequeue_download(failed_chapter_id)
-        time.sleep(1)
-        enqueue_to_mark_downloaded(failed_chapter_id)
-
-        logger.info(f"  ✓ Successfully recovered {chapter_name} into {dest_source_name}")
+        logger.info(f"    Download started from {source_name} (parallel mode)")
         return True
 
     logger.warning(f"  ✗ Could not find alternative source for {manga_title} - {chapter_name}")
     return False
 
 
+def finalize_fallback_download(chapter_id: int, info: dict) -> bool:
+    """Finalize a completed fallback download by moving files and updating Suwayomi."""
+    source_id = info["source_id"]
+    manga_title = info["manga_title"]
+    chapter_name = info["chapter_name"]
+    dest_source_id = info["dest_source_id"]
+    original_manga_title = info["original_manga_title"]
+    original_chapter_name = info["original_chapter_name"]
+    failed_chapter_id = info["failed_chapter_id"]
+
+    source_name = get_source_name(source_id)
+    dest_source_name = get_source_name(dest_source_id)
+
+    logger.info(f"Finalizing fallback download: {original_manga_title} - {original_chapter_name}")
+
+    # Give filesystem a moment to finalize
+    time.sleep(2)
+
+    cbz_file = find_cbz_file(source_id, manga_title, chapter_name)
+
+    if not cbz_file:
+        logger.warning(f"    Could not find downloaded CBZ file from {source_name}")
+        return False
+
+    logger.info(f"    Found CBZ: {cbz_file}")
+
+    # Copy into resolved destination source (canonical folder)
+    if not copy_and_rename_cbz(cbz_file, dest_source_id, original_manga_title, original_chapter_name):
+        return False
+
+    # Clean up alt source files
+    delete_alt_source_files(source_id, manga_title)
+    delete_downloaded_chapter(chapter_id)
+
+    # Dequeue the failed download and re-enqueue original so Suwayomi marks it downloaded
+    dequeue_download(failed_chapter_id)
+    time.sleep(1)
+    enqueue_to_mark_downloaded(failed_chapter_id)
+
+    logger.info(f"  ✓ Successfully recovered {original_chapter_name} into {dest_source_name}")
+    return True
+
+
 def main():
-    """Main loop - monitor and process failed downloads."""
+    """Main loop - monitor and process failed downloads with parallel support."""
     logger.info("=" * 60)
     logger.info("Suwayomi Fallback Downloader started")
     logger.info("=" * 60)
     logger.info(f"Suwayomi URL: {SUWAYOMI_URL}")
     logger.info(f"Downloads path: {DOWNLOADS_PATH}")
     logger.info(f"Check interval: {CHECK_INTERVAL}s")
+    logger.info(f"Max concurrent fallbacks: {MAX_CONCURRENT_FALLBACKS}")
     logger.info("=" * 60)
 
     processed_failures = set()
 
     while True:
         try:
-            failed_downloads = get_failed_downloads()
+            # Check and finalize any completed fallback downloads
+            completed = check_active_downloads()
+            for chapter_id, info in completed.items():
+                try:
+                    finalize_fallback_download(chapter_id, info)
+                except Exception as e:
+                    logger.error(f"Error finalizing download for chapter {chapter_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
 
-            if failed_downloads:
-                new_failures = [
-                    item for item in failed_downloads
-                    if f"{item['manga']['id']}_{item['chapter']['id']}" not in processed_failures
-                ]
+            # Check for new failures and start fallback downloads if under limit
+            if len(_active_fallback_downloads) < MAX_CONCURRENT_FALLBACKS:
+                failed_downloads = get_failed_downloads()
 
-                if new_failures:
-                    logger.info(f"Found {len(new_failures)} new failed downloads")
+                if failed_downloads:
+                    new_failures = [
+                        item for item in failed_downloads
+                        if f"{item['manga']['id']}_{item['chapter']['id']}" not in processed_failures
+                    ]
 
-                    for item in new_failures:
-                        failure_key = f"{item['manga']['id']}_{item['chapter']['id']}"
-                        process_failed_download(item)
-                        processed_failures.add(failure_key)
-                        time.sleep(5)
+                    if new_failures:
+                        # Start fallback downloads up to the concurrent limit
+                        available_slots = MAX_CONCURRENT_FALLBACKS - len(_active_fallback_downloads)
+                        to_process = new_failures[:available_slots]
 
+                        if to_process:
+                            logger.info(f"Found {len(new_failures)} new failed downloads, starting {len(to_process)}")
+
+                            for item in to_process:
+                                failure_key = f"{item['manga']['id']}_{item['chapter']['id']}"
+                                try:
+                                    start_fallback_download(item)
+                                    processed_failures.add(failure_key)
+                                    time.sleep(2)  # Small delay between starts
+                                except Exception as e:
+                                    logger.error(f"Error starting fallback for {item['manga']['title']}: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+            else:
+                logger.info(f"Max concurrent fallbacks reached ({len(_active_fallback_downloads)}/{MAX_CONCURRENT_FALLBACKS}), waiting...")
+
+            # Periodic cleanup
             if len(processed_failures) > 1000:
                 processed_failures.clear()
 
