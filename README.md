@@ -71,7 +71,9 @@ All settings are configured via environment variables in `docker-compose.yml`. T
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) file for details.## About
+MIT License - See [LICENSE](LICENSE) file for details.
+
+## About
 
 This was made mostly for personal use to solve persistent download failures due to rate limiting and source instability. Made in collaboration with AI.
 
