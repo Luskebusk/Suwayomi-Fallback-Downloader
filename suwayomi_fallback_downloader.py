@@ -4,7 +4,7 @@ Suwayomi Fallback Downloader
 Monitors download queue for failures and attempts to download from alternative sources.
 """
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 import os
 import shutil
@@ -98,6 +98,7 @@ TITLE_MATCH_THRESHOLD = 0.85  # Minimum similarity score (0-1) to match manga ti
 DOWNLOAD_WAIT_TIMEOUT = 300  # Maximum time to wait for a download to complete (seconds)
 DOWNLOAD_CHECK_INTERVAL = 5  # How often to check download progress (seconds)
 MAX_CONCURRENT_FALLBACKS = int(os.environ.get("MAX_CONCURRENT_FALLBACKS", "3"))  # Max parallel fallback downloads
+MAX_SOURCE_RETRY_LOOPS = int(os.environ.get("MAX_SOURCE_RETRY_LOOPS", "3"))  # How many times to loop through all sources before giving up
 
 # ============================================================================
 # END CONFIGURATION
@@ -116,6 +117,10 @@ _source_id_by_name_cache = {}
 # Active fallback downloads tracking
 # Format: {chapter_id: {"source_id": str, "manga_title": str, "chapter_name": str, "start_time": float, "dest_source_id": str}}
 _active_fallback_downloads = {}
+
+# Track which sources have been tried for each failure
+# Format: {"manga_id_chapter_id": [source_id1, source_id2, ...]}
+_tried_sources = {}
 
 
 def check_for_updates() -> None:
@@ -655,7 +660,7 @@ def delete_alt_source_files(source_id: str, manga_title: str) -> bool:
         return False
 
 
-def start_fallback_download(failed_item: dict) -> bool:
+def start_fallback_download(failed_item: dict, tried_sources: list = None) -> bool:
     """Start a fallback download for a failed chapter (non-blocking)."""
     manga_title = failed_item["manga"]["title"]
     failed_source_id = failed_item["manga"]["sourceId"]
@@ -674,9 +679,17 @@ def start_fallback_download(failed_item: dict) -> bool:
     if dest_source_id != failed_source_id:
         logger.info(f"  Overriding destination to existing source: {dest_source_name}")
 
+    # Initialize tried sources list if not provided
+    if tried_sources is None:
+        tried_sources = []
+
     for source_id in SOURCE_PRIORITY:
         # Skip the destination source when searching alt sources
         if source_id == dest_source_id:
+            continue
+        
+        # Skip already tried sources
+        if source_id in tried_sources:
             continue
 
         source_name = get_source_name(source_id)
@@ -708,6 +721,7 @@ def start_fallback_download(failed_item: dict) -> bool:
 
         # Start the download (non-blocking)
         if not start_download(target_chapter["id"]):
+            tried_sources.append(source_id)
             continue
 
         # Track this download
@@ -723,10 +737,10 @@ def start_fallback_download(failed_item: dict) -> bool:
         }
 
         logger.info(f"    Download started from {source_name} (parallel mode)")
-        return True
+        return source_id  # Return the source ID that was tried
 
     logger.warning(f"  ✗ Could not find alternative source for {manga_title} - {chapter_name}")
-    return False
+    return None
 
 
 def finalize_fallback_download(chapter_id: int, info: dict) -> bool:
@@ -781,12 +795,15 @@ def main():
     logger.info(f"Downloads path: {DOWNLOADS_PATH}")
     logger.info(f"Check interval: {CHECK_INTERVAL}s")
     logger.info(f"Max concurrent fallbacks: {MAX_CONCURRENT_FALLBACKS}")
+    logger.info(f"Max source retry loops: {MAX_SOURCE_RETRY_LOOPS}")
     logger.info("=" * 60)
     
     # Check for updates on startup
     check_for_updates()
 
     processed_failures = set()
+    # Track tried sources per failure: {failure_key: {"sources": [source_ids], "original_source": source_id, "loops": int}}
+    tried_sources_per_failure = {}
 
     while True:
         try:
@@ -819,10 +836,41 @@ def main():
                             for item in to_process:
                                 failure_key = f"{item['manga']['id']}_{item['chapter']['id']}"
                                 try:
-                                    if start_fallback_download(item):
-                                        processed_failures.add(failure_key)
+                                    # Initialize tracking for this failure if first time
+                                    if failure_key not in tried_sources_per_failure:
+                                        tried_sources_per_failure[failure_key] = {
+                                            "sources": [],
+                                            "original_source": item['manga']['sourceId'],  # Store ORIGINAL source
+                                            "loops": 0
+                                        }
+                                    
+                                    failure_info = tried_sources_per_failure[failure_key]
+                                    tried = failure_info["sources"]
+                                    
+                                    # Override item's sourceId with the original one for correct file placement
+                                    item['manga']['sourceId'] = failure_info["original_source"]
+                                    
+                                    # Try to start download, passing tried sources
+                                    result = start_fallback_download(item, tried)
+                                    
+                                    if result:  # Returns source_id on success
+                                        # Track this source as tried
+                                        failure_info["sources"].append(result)
                                     else:
-                                        logger.debug(f"Will retry {failure_key} on next iteration")
+                                        # Check if we've tried all sources
+                                        if len(tried) >= len(SOURCE_PRIORITY) - 1:  # -1 for dest source
+                                            failure_info["loops"] += 1
+                                            
+                                            # Check if we've exhausted our retry loops
+                                            if failure_info["loops"] >= MAX_SOURCE_RETRY_LOOPS:
+                                                logger.info(f"  All sources exhausted after {failure_info['loops']} loops for {failure_key}, marking as processed")
+                                                processed_failures.add(failure_key)
+                                            else:
+                                                # Reset tried sources to start a new loop
+                                                logger.info(f"  Completed loop {failure_info['loops']}/{MAX_SOURCE_RETRY_LOOPS}, retrying all sources")
+                                                failure_info["sources"] = []
+                                        else:
+                                            logger.debug(f"Will retry {failure_key} with remaining sources")
                                     time.sleep(2)  # Small delay between starts
                                 except Exception as e:
                                     logger.exception(f"Error starting fallback for {item['manga']['title']}: {e}")
@@ -832,6 +880,7 @@ def main():
             # Periodic cleanup
             if len(processed_failures) > 1000:
                 processed_failures.clear()
+                tried_sources_per_failure.clear()
 
         except Exception as e:
             logger.exception(f"Error in main loop: {e}")

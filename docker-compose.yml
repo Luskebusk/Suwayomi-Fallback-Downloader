@@ -19,6 +19,7 @@ services:
       # Monitoring settings
       CHECK_INTERVAL: "60"  # How often to check for failed downloads (in seconds)
       MAX_CONCURRENT_FALLBACKS: "3"  # Maximum parallel fallback downloads
+      MAX_SOURCE_RETRY_LOOPS: "3"  # How many times to loop through all sources before giving up
       
       # ====================================================================
       # Source Priority - Try sources in this order (most reliable first)
