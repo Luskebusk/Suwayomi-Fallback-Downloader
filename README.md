@@ -4,6 +4,9 @@ Automatically recover failed manga chapter downloads in Suwayomi by trying alter
 
 > **Note:** This script is designed specifically for CBZ format downloads. It only handles `.cbz` files.
 
+## Warning
+This is built and setup based on my repo list in Suwayomi. Remember to change the sources in docker-compose or at least verify they match your repo setup for sources.
+
 ## Features
 
 - **Automatic Recovery** - Detects and recovers failed downloads without manual intervention
