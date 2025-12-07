@@ -22,6 +22,17 @@ services:
       MAX_SOURCE_RETRY_LOOPS: "3"  # How many times to loop through all sources before giving up
       
       # ====================================================================
+      # Load Balancing (EXPERIMENTAL) - Distribute bulk downloads across sources
+      # WARNING: This is an experimental feature. Use at your own risk.
+      # When enabled, the script will automatically distribute bulk downloads
+      # (10+ chapters for the same manga) across different sources in round-robin
+      # fashion to avoid rate limits and improve download speed.
+      # ====================================================================
+      ENABLE_LOAD_BALANCING: "false"  # Set to "true" to enable experimental load balancing
+      MAX_LOAD_BALANCED_DOWNLOADS: "4"  # Max parallel downloads when load balancing
+      LOAD_BALANCE_THRESHOLD: "10"  # Min chapters queued for same manga to activate balancing
+      
+      # ====================================================================
       # Source Priority - Try sources in this order (most reliable first)
       # Add/remove/reorder source IDs as needed (comma-separated, no spaces)
       # ====================================================================

@@ -4,7 +4,7 @@ Suwayomi Fallback Downloader
 Monitors download queue for failures and attempts to download from alternative sources.
 """
 
-__version__ = "1.1.3"
+__version__ = "1.2.0"
 
 import os
 import shutil
@@ -100,6 +100,11 @@ DOWNLOAD_CHECK_INTERVAL = 5  # How often to check download progress (seconds)
 MAX_CONCURRENT_FALLBACKS = int(os.environ.get("MAX_CONCURRENT_FALLBACKS", "3"))  # Max parallel fallback downloads
 MAX_SOURCE_RETRY_LOOPS = int(os.environ.get("MAX_SOURCE_RETRY_LOOPS", "3"))  # How many times to loop through all sources before giving up
 
+# Load Balancing Settings (Experimental)
+ENABLE_LOAD_BALANCING = os.environ.get("ENABLE_LOAD_BALANCING", "false").lower() == "true"  # Enable experimental load balancing mode
+MAX_LOAD_BALANCED_DOWNLOADS = int(os.environ.get("MAX_LOAD_BALANCED_DOWNLOADS", "4"))  # Max parallel downloads in load balancing mode
+LOAD_BALANCE_THRESHOLD = int(os.environ.get("LOAD_BALANCE_THRESHOLD", "10"))  # Min chapters queued for same manga to activate load balancing
+
 # ============================================================================
 # END CONFIGURATION
 # ============================================================================
@@ -121,6 +126,12 @@ _active_fallback_downloads = {}
 # Track which sources have been tried for each failure
 # Format: {"manga_id_chapter_id": [source_id1, source_id2, ...]}
 _tried_sources = {}
+
+# Load balancing tracking
+# Format: {chapter_id: {"source_id": str, "manga_id": str, "manga_title": str, "chapter_name": str, "start_time": float, "original_source_id": str}}
+_load_balanced_downloads = {}
+# Track which source to use next in round-robin (per manga)
+_load_balance_source_index = {}
 
 
 def check_for_updates() -> None:
@@ -464,6 +475,312 @@ def dequeue_download(chapter_id: int) -> bool:
     except Exception as e:
         logger.warning(f"Failed to dequeue chapter {chapter_id}: {e}")
         return False
+
+
+def start_proactive_download(chapter_info: dict, target_source_id: str, original_source_id: str) -> bool:
+    """
+    Proactively start downloading a chapter from an alternative source.
+    Used for load balancing - we search for the same chapter on the target source
+    and download it directly, then copy it to the original source location.
+    
+    Args:
+        chapter_info: Dict with manga_id, manga_title, chapter_number, chapter_name
+        target_source_id: Source ID to download from
+        original_source_id: Original source ID (for final file placement)
+    
+    Returns:
+        Chapter ID from target source if successful, None otherwise
+    """
+    try:
+        manga_title = chapter_info["manga_title"]
+        chapter_num = chapter_info["chapter_number"]
+        
+        # Search for matching manga on target source
+        search_results = search_manga_on_source(manga_title, target_source_id)
+        if not search_results:
+            logger.debug(f"      No results searching for '{manga_title}' on {get_source_name(target_source_id)}")
+            return None
+        
+        # Find best match
+        best_match = find_best_match(manga_title, search_results)
+        if not best_match:
+            logger.debug(f"      No good match for '{manga_title}' on {get_source_name(target_source_id)}")
+            return None
+        
+        # Fetch chapters from target manga
+        target_chapters = fetch_chapters(best_match["id"])
+        matching_chapter = find_matching_chapter(target_chapters, chapter_num)
+        
+        if not matching_chapter:
+            logger.debug(f"      Chapter {chapter_num} not found on {get_source_name(target_source_id)}")
+            return None
+        
+        target_chapter_id = matching_chapter["id"]
+        
+        # Enqueue the download
+        if not enqueue_download(target_chapter_id):
+            logger.warning(f"      Failed to enqueue chapter {target_chapter_id}")
+            return None
+        
+        # Start the download
+        if not start_download(target_chapter_id):
+            logger.warning(f"      Failed to start download for chapter {target_chapter_id}")
+            dequeue_download(target_chapter_id)
+            return None
+        
+        logger.info(f"      Started download from {get_source_name(target_source_id)}")
+        return target_chapter_id
+        
+    except Exception as e:
+        logger.warning(f"      Error starting proactive download: {e}")
+        return None
+
+
+def get_queued_downloads() -> list:
+    """Get all chapters currently in QUEUED state."""
+    query = """
+    {
+        downloadStatus {
+            queue {
+                chapter {
+                    id
+                    name
+                    chapterNumber
+                    manga {
+                        id
+                        title
+                        sourceId
+                    }
+                    sourceId
+                }
+                state
+            }
+        }
+    }
+    """
+    
+    try:
+        result = graphql_request(query)
+        queue = result.get("data", {}).get("downloadStatus", {}).get("queue", [])
+        
+        queued = []
+        for item in queue:
+            if item.get("state") == "Queued":
+                chapter = item.get("chapter", {})
+                manga = chapter.get("manga", {})
+                queued.append({
+                    "chapter_id": chapter.get("id"),
+                    "chapter_name": chapter.get("name"),
+                    "chapter_number": chapter.get("chapterNumber"),
+                    "manga_id": manga.get("id"),
+                    "manga_title": manga.get("title"),
+                    "source_id": chapter.get("sourceId") or manga.get("sourceId"),
+                })
+        
+        return queued
+        
+    except Exception as e:
+        logger.error(f"Error getting queued downloads: {e}")
+        return []
+
+
+def detect_bulk_downloads() -> dict:
+    """
+    Detect bulk download batches (multiple chapters for same manga).
+    Returns: {manga_id: [chapter_info, ...]} for mangas with >= LOAD_BALANCE_THRESHOLD chapters
+    """
+    queued = get_queued_downloads()
+    
+    # Group by manga_id
+    by_manga = {}
+    for chapter in queued:
+        manga_id = chapter["manga_id"]
+        if manga_id not in by_manga:
+            by_manga[manga_id] = []
+        by_manga[manga_id].append(chapter)
+    
+    # Filter to only mangas with bulk downloads
+    bulk_batches = {}
+    for manga_id, chapters in by_manga.items():
+        if len(chapters) >= LOAD_BALANCE_THRESHOLD:
+            bulk_batches[manga_id] = chapters
+    
+    return bulk_batches
+
+
+def get_next_load_balance_source(manga_id: str, exclude_source: str = None) -> str:
+    """
+    Get the next source to use for load balancing using round-robin.
+    Args:
+        manga_id: The manga ID to track round-robin state
+        exclude_source: Optional source ID to exclude (usually the original source)
+    Returns:
+        Source ID to use next
+    """
+    # Initialize index if not exists
+    if manga_id not in _load_balance_source_index:
+        _load_balance_source_index[manga_id] = 0
+    
+    # Get available sources (excluding the original if specified)
+    available_sources = [s for s in SOURCE_PRIORITY if s != exclude_source] if exclude_source else SOURCE_PRIORITY.copy()
+    
+    if not available_sources:
+        return SOURCE_PRIORITY[0]  # Fallback to first source
+    
+    # Get current index and increment for next time
+    idx = _load_balance_source_index[manga_id]
+    _load_balance_source_index[manga_id] = (idx + 1) % len(available_sources)
+    
+    return available_sources[idx]
+
+
+def process_load_balancing() -> None:
+    """
+    Main load balancing logic. Detects bulk downloads and proactively downloads
+    from alternative sources to distribute load and avoid rate limits.
+    """
+    if not ENABLE_LOAD_BALANCING:
+        return
+    
+    # Check if we're already at max load balanced downloads
+    if len(_load_balanced_downloads) >= MAX_LOAD_BALANCED_DOWNLOADS:
+        return
+    
+    # Detect bulk download batches
+    bulk_batches = detect_bulk_downloads()
+    
+    if not bulk_batches:
+        return
+    
+    logger.info(f"🔄 Load balancing: Found {len(bulk_batches)} manga(s) with bulk downloads")
+    
+    for manga_id, chapters in bulk_batches.items():
+        manga_title = chapters[0]["manga_title"]
+        original_source = chapters[0]["source_id"]
+        original_source_name = get_source_name(original_source)
+        
+        logger.info(f"   📚 {manga_title}: {len(chapters)} chapters queued from {original_source_name}")
+        
+        # Proactively download chapters from alternative sources using round-robin
+        distributed = 0
+        for chapter in chapters:
+            # Stop if we reach max concurrent
+            if len(_load_balanced_downloads) >= MAX_LOAD_BALANCED_DOWNLOADS:
+                break
+            
+            # Skip if already processing this chapter
+            original_chapter_id = chapter["chapter_id"]
+            if original_chapter_id in _load_balanced_downloads:
+                continue
+            
+            # Get next source in round-robin
+            target_source = get_next_load_balance_source(str(manga_id), original_source)
+            target_source_name = get_source_name(target_source)
+            
+            logger.info(f"   ⚖️  Distributing Ch.{chapter['chapter_number']} to {target_source_name}")
+            
+            # Start proactive download from alternative source
+            target_chapter_id = start_proactive_download(chapter, target_source, original_source)
+            
+            if target_chapter_id:
+                # Track this as load balanced download
+                _load_balanced_downloads[target_chapter_id] = {
+                    "source_id": target_source,
+                    "manga_id": str(manga_id),
+                    "manga_title": manga_title,
+                    "chapter_name": chapter["chapter_name"],
+                    "chapter_number": chapter["chapter_number"],
+                    "start_time": time.time(),
+                    "original_source_id": original_source,
+                    "original_chapter_id": original_chapter_id,
+                }
+                distributed += 1
+            else:
+                logger.debug(f"      Could not start download from {target_source_name}")
+        
+        if distributed > 0:
+            logger.info(f"   ✅ Successfully distributed {distributed} chapters")
+
+
+def check_load_balanced_downloads() -> None:
+    """
+    Monitor load balanced downloads. When complete, copy files to original source location
+    and dequeue the original chapter from the queue.
+    """
+    if not _load_balanced_downloads:
+        return
+    
+    current_time = time.time()
+    to_finalize = []
+    to_remove = []
+    
+    for chapter_id, info in list(_load_balanced_downloads.items()):
+        elapsed = current_time - info["start_time"]
+        
+        # Check if download is complete or failed
+        download_status = get_download_status()
+        chapter_in_error = any(d["chapter_id"] == chapter_id and d["state"] == "Error" for d in download_status)
+        chapter_in_queue = any(d["chapter_id"] == chapter_id for d in download_status)
+        
+        if chapter_in_error:
+            # Failed - let Suwayomi handle it normally, remove from our tracking
+            logger.warning(f"   ❌ Load balanced download failed: {info['manga_title']} Ch.{info['chapter_number']}")
+            to_remove.append(chapter_id)
+            
+        elif not chapter_in_queue:
+            # Download completed - need to copy to original source location
+            to_finalize.append(chapter_id)
+            
+        elif elapsed > DOWNLOAD_WAIT_TIMEOUT:
+            # Timeout - remove from tracking
+            logger.warning(f"   ⏱️  Load balanced download timeout: {info['manga_title']} Ch.{info['chapter_number']}")
+            to_remove.append(chapter_id)
+    
+    # Finalize completed downloads
+    for chapter_id in to_finalize:
+        if chapter_id in _load_balanced_downloads:
+            info = _load_balanced_downloads[chapter_id]
+            try:
+                # Get the downloaded file path from source
+                source_folder = get_source_folder(info["source_id"])
+                manga_folder = os.path.join(source_folder, info["manga_title"])
+                
+                # Find the CBZ file
+                cbz_files = [f for f in os.listdir(manga_folder) if f.endswith('.cbz')] if os.path.exists(manga_folder) else []
+                
+                if cbz_files:
+                    # Use first found CBZ (should only be one for this chapter)
+                    source_file = os.path.join(manga_folder, cbz_files[0])
+                    
+                    # Get destination using Suwayomi's expected filename
+                    dest_folder = os.path.join(get_source_folder(info["original_source_id"]), info["manga_title"])
+                    expected_filename = get_suwayomi_expected_filename(info["original_chapter_id"])
+                    dest_file = os.path.join(dest_folder, expected_filename)
+                    
+                    # Copy file
+                    os.makedirs(dest_folder, exist_ok=True)
+                    shutil.copy2(source_file, dest_file)
+                    os.chown(dest_file, CHOWN_UID, CHOWN_GID)
+                    
+                    # Delete the downloaded file from alternative source
+                    delete_alt_source_files(manga_folder, source_file)
+                    
+                    # Dequeue the original chapter (it's still queued on the original source)
+                    dequeue_download(info["original_chapter_id"])
+                    
+                    logger.info(f"   ✅ Load balanced: {info['manga_title']} Ch.{info['chapter_number']} copied to {get_source_name(info['original_source_id'])}")
+                else:
+                    logger.warning(f"   ⚠️  Could not find downloaded file for load balanced chapter {chapter_id}")
+                    
+            except Exception as e:
+                logger.error(f"   Error finalizing load balanced download: {e}")
+            
+            to_remove.append(chapter_id)
+    
+    # Clean up
+    for chapter_id in to_remove:
+        if chapter_id in _load_balanced_downloads:
+            del _load_balanced_downloads[chapter_id]
 
 
 def enqueue_to_mark_downloaded(chapter_id: int) -> bool:
@@ -858,6 +1175,12 @@ def main():
     logger.info(f"Check interval: {CHECK_INTERVAL}s")
     logger.info(f"Max concurrent fallbacks: {MAX_CONCURRENT_FALLBACKS}")
     logger.info(f"Max source retry loops: {MAX_SOURCE_RETRY_LOOPS}")
+    if ENABLE_LOAD_BALANCING:
+        logger.info(f"⚖️  Load balancing: ENABLED")
+        logger.info(f"   Max load balanced downloads: {MAX_LOAD_BALANCED_DOWNLOADS}")
+        logger.info(f"   Activation threshold: {LOAD_BALANCE_THRESHOLD} chapters")
+    else:
+        logger.info(f"Load balancing: disabled")
     logger.info("=" * 60)
     
     # Check for updates on startup
@@ -873,6 +1196,11 @@ def main():
 
     while True:
         try:
+            # Process load balancing if enabled
+            if ENABLE_LOAD_BALANCING:
+                check_load_balanced_downloads()
+                process_load_balancing()
+            
             # Check and finalize any completed fallback downloads
             completed = check_active_downloads()
             for chapter_id, info in completed.items():
