@@ -4,7 +4,7 @@ Suwayomi Fallback Downloader
 Monitors download queue for failures and attempts to download from alternative sources.
 """
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 import os
 import shutil
@@ -229,8 +229,45 @@ def get_source_folder(source_id: str) -> str:
     return get_source_name(source_id)
 
 
+def get_suwayomi_expected_filename(chapter_id: int) -> str:
+    """Get the EXACT filename Suwayomi expects based on its database.
+    
+    Suwayomi builds filenames as: {scanlator}_{name}.cbz or just {name}.cbz if no scanlator.
+    This must match exactly or Suwayomi won't detect the file.
+    """
+    query = """
+    query GET_CHAPTER($id: Int!) {
+        chapter(id: $id) {
+            id
+            name
+            scanlator
+        }
+    }
+    """
+    try:
+        result = graphql_request(query, {"id": chapter_id})
+        chapter = result.get("data", {}).get("chapter", {})
+        name = chapter.get("name", "")
+        scanlator = chapter.get("scanlator")
+        
+        # Build filename exactly as Suwayomi does (see getChapterDir in DirName.kt)
+        if scanlator:
+            filename = f"{scanlator}_{name}.cbz"
+        else:
+            filename = f"{name}.cbz"
+        
+        return filename
+    except Exception as e:
+        logger.warning(f"Could not get expected filename for chapter {chapter_id}: {e}")
+        return None
+
+
 def get_filename_for_source(source_id: str, chapter_name: str) -> str:
-    """Generate the correct filename for a chapter based on source."""
+    """Generate the correct filename for a chapter based on source.
+    
+    NOTE: This is only used for alt sources. For the destination (original) source,
+    use get_suwayomi_expected_filename() instead to match Suwayomi's exact expectations.
+    """
     pattern = SOURCE_FILENAME_PATTERNS.get(source_id, {"prefix": "", "transform": lambda x: x})
     prefix = pattern["prefix"]
     transformed_name = pattern["transform"](chapter_name)
@@ -618,11 +655,18 @@ def find_cbz_file(source_id: str, manga_title: str, chapter_name: str) -> str | 
     return None
 
 
-def copy_and_rename_cbz(source_file: str, dest_source_id: str, manga_title: str, chapter_name: str) -> bool:
+def copy_and_rename_cbz(source_file: str, dest_source_id: str, manga_title: str, chapter_name: str, chapter_id: int) -> bool:
     """Copy CBZ file to original source folder with correct naming."""
     dest_source_folder = get_source_folder(dest_source_id)
     dest_manga_path = os.path.join(DOWNLOADS_PATH, dest_source_folder, manga_title)
-    dest_filename = get_filename_for_source(dest_source_id, chapter_name)
+    
+    # Get the EXACT filename Suwayomi expects from its database
+    dest_filename = get_suwayomi_expected_filename(chapter_id)
+    if not dest_filename:
+        # Fallback to source-based naming if we can't get Suwayomi's expected name
+        logger.warning(f"    Could not determine Suwayomi expected filename, using fallback")
+        dest_filename = get_filename_for_source(dest_source_id, chapter_name)
+    
     dest_path = os.path.join(dest_manga_path, dest_filename)
 
     try:
@@ -640,19 +684,30 @@ def copy_and_rename_cbz(source_file: str, dest_source_id: str, manga_title: str,
         return False
 
 
-def delete_alt_source_files(source_id: str, manga_title: str) -> bool:
-    """Delete the alt source manga folder to save space."""
+def delete_alt_source_files(source_id: str, manga_title: str, cbz_file: str = None) -> bool:
+    """Delete the specific CBZ file or alt source manga folder to save space."""
     source_folder = get_source_folder(source_id)
     manga_path = os.path.join(DOWNLOADS_PATH, source_folder, manga_title)
 
     try:
-        if os.path.exists(manga_path):
+        # If a specific CBZ file is provided, only delete that file
+        if cbz_file and os.path.exists(cbz_file):
+            os.remove(cbz_file)
+            logger.info(f"    Deleted CBZ file: {cbz_file}")
+            
+            # Only delete the manga folder if it's now empty
+            if os.path.exists(manga_path) and not os.listdir(manga_path):
+                os.rmdir(manga_path)
+                logger.info(f"    Deleted empty manga folder: {manga_path}")
+        elif os.path.exists(manga_path):
+            # Fallback: delete entire folder if no specific file provided
             shutil.rmtree(manga_path)
             logger.info(f"    Deleted alt source folder: {manga_path}")
 
-            source_path = os.path.join(DOWNLOADS_PATH, source_folder)
-            if os.path.exists(source_path) and not os.listdir(source_path):
-                os.rmdir(source_path)
+        # Clean up empty source folder
+        source_path = os.path.join(DOWNLOADS_PATH, source_folder)
+        if os.path.exists(source_path) and not os.listdir(source_path):
+            os.rmdir(source_path)
 
         return True
     except Exception as e:
@@ -660,9 +715,10 @@ def delete_alt_source_files(source_id: str, manga_title: str) -> bool:
         return False
 
 
-def start_fallback_download(failed_item: dict, tried_sources: list = None) -> bool:
+def start_fallback_download(failed_item: dict, tried_sources: list = None, failure_key: str = None) -> bool:
     """Start a fallback download for a failed chapter (non-blocking)."""
     manga_title = failed_item["manga"]["title"]
+    manga_id = failed_item["manga"]["id"]
     failed_source_id = failed_item["manga"]["sourceId"]
     chapter_num = failed_item["chapter"]["chapterNumber"]
     chapter_name = failed_item["chapter"]["name"]
@@ -734,6 +790,7 @@ def start_fallback_download(failed_item: dict, tried_sources: list = None) -> bo
             "original_manga_title": manga_title,
             "original_chapter_name": chapter_name,
             "failed_chapter_id": failed_chapter_id,
+            "failure_key": failure_key,  # Store failure_key so we can mark it as processed later
         }
 
         logger.info(f"    Download started from {source_name} (parallel mode)")
@@ -743,8 +800,11 @@ def start_fallback_download(failed_item: dict, tried_sources: list = None) -> bo
     return None
 
 
-def finalize_fallback_download(chapter_id: int, info: dict) -> bool:
-    """Finalize a completed fallback download by moving files and updating Suwayomi."""
+def finalize_fallback_download(chapter_id: int, info: dict, manga_id: int = None) -> bool:
+    """Finalize a completed fallback download by moving files and updating Suwayomi.
+    
+    Returns the failure_key if successful so it can be marked as processed.
+    """
     source_id = info["source_id"]
     manga_title = info["manga_title"]
     chapter_name = info["chapter_name"]
@@ -770,14 +830,16 @@ def finalize_fallback_download(chapter_id: int, info: dict) -> bool:
     logger.info(f"    Found CBZ: {cbz_file}")
 
     # Copy into resolved destination source (canonical folder)
-    if not copy_and_rename_cbz(cbz_file, dest_source_id, original_manga_title, original_chapter_name):
+    # Use the failed_chapter_id to get Suwayomi's exact expected filename
+    if not copy_and_rename_cbz(cbz_file, dest_source_id, original_manga_title, original_chapter_name, failed_chapter_id):
         return False
 
-    # Clean up alt source files
-    delete_alt_source_files(source_id, manga_title)
+    # Clean up alt source files - only delete the specific CBZ file to avoid conflicts with parallel downloads
+    delete_alt_source_files(source_id, manga_title, cbz_file)
     delete_downloaded_chapter(chapter_id)
 
-    # Dequeue the failed download and re-enqueue original so Suwayomi marks it downloaded
+    # The key: Dequeue the ERROR chapter, then re-enqueue it
+    # When Suwayomi's downloader processes it, it will find the file exists and mark as downloaded
     dequeue_download(failed_chapter_id)
     time.sleep(1)
     enqueue_to_mark_downloaded(failed_chapter_id)
@@ -804,6 +866,10 @@ def main():
     processed_failures = set()
     # Track tried sources per failure: {failure_key: {"sources": [source_ids], "original_source": source_id, "loops": int}}
     tried_sources_per_failure = {}
+    # Track which failures have been successfully recovered and are waiting for Suwayomi to detect the file
+    pending_detection = set()
+    # Track when items were added to pending_detection for timeout handling
+    pending_detection_times = {}
 
     while True:
         try:
@@ -811,9 +877,38 @@ def main():
             completed = check_active_downloads()
             for chapter_id, info in completed.items():
                 try:
-                    finalize_fallback_download(chapter_id, info)
+                    success = finalize_fallback_download(chapter_id, info)
+                    if success:
+                        # Mark as pending detection - we've recovered it, now waiting for Suwayomi to detect the file
+                        failure_key = info.get("failure_key")
+                        if failure_key:
+                            pending_detection.add(failure_key)
+                            pending_detection_times[failure_key] = time.time()
+                            # Clean up source tracking for this failure
+                            if failure_key in tried_sources_per_failure:
+                                del tried_sources_per_failure[failure_key]
                 except Exception as e:
                     logger.exception(f"Error finalizing download for chapter {chapter_id}: {e}")
+
+            # Clean up pending_detection for items no longer in failed state or timed out
+            if pending_detection:
+                failed_downloads_check = get_failed_downloads()
+                failed_keys = {f"{item['manga']['id']}_{item['chapter']['id']}" for item in failed_downloads_check}
+                current_time = time.time()
+                
+                for failure_key in list(pending_detection):
+                    # If no longer in failed downloads, Suwayomi detected it successfully!
+                    if failure_key not in failed_keys:
+                        logger.info(f"  ✓ Suwayomi successfully detected recovered chapter: {failure_key}")
+                        pending_detection.discard(failure_key)
+                        pending_detection_times.pop(failure_key, None)
+                        processed_failures.add(failure_key)
+                    # If still in failed state after 2 minutes, give up and mark as processed to avoid infinite loop
+                    elif current_time - pending_detection_times.get(failure_key, current_time) > 120:
+                        logger.warning(f"  Timeout waiting for Suwayomi to detect file for {failure_key}, marking as processed")
+                        pending_detection.discard(failure_key)
+                        pending_detection_times.pop(failure_key, None)
+                        processed_failures.add(failure_key)
 
             # Check for new failures and start fallback downloads if under limit
             if len(_active_fallback_downloads) < MAX_CONCURRENT_FALLBACKS:
@@ -823,6 +918,7 @@ def main():
                     new_failures = [
                         item for item in failed_downloads
                         if f"{item['manga']['id']}_{item['chapter']['id']}" not in processed_failures
+                        and f"{item['manga']['id']}_{item['chapter']['id']}" not in pending_detection
                     ]
 
                     if new_failures:
@@ -850,8 +946,8 @@ def main():
                                     # Override item's sourceId with the original one for correct file placement
                                     item['manga']['sourceId'] = failure_info["original_source"]
                                     
-                                    # Try to start download, passing tried sources
-                                    result = start_fallback_download(item, tried)
+                                    # Try to start download, passing tried sources and failure_key
+                                    result = start_fallback_download(item, tried, failure_key)
                                     
                                     if result:  # Returns source_id on success
                                         # Track this source as tried

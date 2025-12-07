@@ -45,6 +45,8 @@ services:
       
       # ====================================================================
       # Filename Patterns - Define how each source names its downloaded files
+      # NOTE: Only used to FIND downloaded files from alternative sources.
+      #       The final filename is automatically determined from Suwayomi's database.
       # Format: SOURCE_ID:PREFIX:TRANSFORM_TYPE
       # - SOURCE_ID: The source ID number
       # - PREFIX: Text added before chapter name (empty for none)
