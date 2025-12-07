@@ -4,6 +4,8 @@ Suwayomi Fallback Downloader
 Monitors download queue for failures and attempts to download from alternative sources.
 """
 
+__version__ = "1.1.0"
+
 import os
 import shutil
 import time
@@ -88,6 +90,29 @@ _source_id_by_name_cache = {}
 # Active fallback downloads tracking
 # Format: {chapter_id: {"source_id": str, "manga_title": str, "chapter_name": str, "start_time": float, "dest_source_id": str}}
 _active_fallback_downloads = {}
+
+
+def check_for_updates() -> None:
+    """Check if a newer version is available on GitHub."""
+    try:
+        response = requests.get(
+            "https://api.github.com/repos/Luskebusk/Suwayomi-Fallback-Downloader/releases/latest",
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            latest_version = data.get("tag_name", "").lstrip("v")
+            current_version = __version__
+            
+            if latest_version and latest_version != current_version:
+                logger.warning("=" * 60)
+                logger.warning(f"UPDATE AVAILABLE: v{latest_version} (current: v{current_version})")
+                logger.warning(f"Download: {data.get('html_url', 'https://github.com/Luskebusk/Suwayomi-Fallback-Downloader/releases')}")
+                logger.warning("=" * 60)
+            else:
+                logger.info(f"Running latest version: v{current_version}")
+    except Exception as e:
+        logger.debug(f"Could not check for updates: {e}")
 
 
 def graphql_request(query: str, variables: dict = None) -> dict:
@@ -712,13 +737,16 @@ def finalize_fallback_download(chapter_id: int, info: dict) -> bool:
 def main():
     """Main loop - monitor and process failed downloads with parallel support."""
     logger.info("=" * 60)
-    logger.info("Suwayomi Fallback Downloader started")
+    logger.info(f"Suwayomi Fallback Downloader v{__version__}")
     logger.info("=" * 60)
     logger.info(f"Suwayomi URL: {SUWAYOMI_URL}")
     logger.info(f"Downloads path: {DOWNLOADS_PATH}")
     logger.info(f"Check interval: {CHECK_INTERVAL}s")
     logger.info(f"Max concurrent fallbacks: {MAX_CONCURRENT_FALLBACKS}")
     logger.info("=" * 60)
+    
+    # Check for updates on startup
+    check_for_updates()
 
     processed_failures = set()
 
