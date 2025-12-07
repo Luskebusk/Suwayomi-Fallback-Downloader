@@ -4,153 +4,80 @@ Automatically recover failed manga chapter downloads in Suwayomi by trying alter
 
 > **Note:** This script is designed specifically for CBZ format downloads. It only handles `.cbz` files.
 
-## How It Works
+## Features
 
-This script monitors your Suwayomi download queue for failed downloads. When a chapter fails to download from its primary source, the script:
+- **Automatic Recovery** - Detects and recovers failed downloads without manual intervention
+- **Parallel Downloads** - Downloads from multiple sources simultaneously (up to 3 by default)
+- **Smart Matching** - Finds the correct manga even with title variations
+- **Source Priority** - Configure which sources to try first
+- **File Organization** - Maintains your existing folder structure
+- **Docker Ready** - Easy deployment with docker-compose
+- **Fully Configurable** - All settings via environment variables
 
-1. **Detects** the failed download in the queue
-2. **Searches** for the same manga on alternative sources (in priority order)
-3. **Downloads** the chapter from the first available alternative source
-4. **Moves & Renames** the file to match your primary source's naming convention
-5. **Updates** Suwayomi to mark the chapter as downloaded
+## Quick Links
 
-This ensures seamless integration - all your manga chapters stay organized under their original source, even when downloaded from alternatives.
+📚 **[Full Documentation (Wiki)](../../wiki)** - Comprehensive guides and configuration
 
-## Comments
+- [Quick Start Guide](../../wiki/Quick-Start) - Get up and running in 5 minutes
+- [Configuration Guide](../../wiki/Configuration-Guide) - Customize sources and settings
+- [Networking Setup](../../wiki/Networking-Setup) - Connect to your Suwayomi instance
+- [Troubleshooting](../../wiki/Troubleshooting) - Common issues and solutions
+- [Advanced Configuration](../../wiki/Advanced-Configuration) - Custom sources and performance tuning
 
-This was made mostly for personal use - I'm not aware of a better solution to this issue.
-I was frustrated by downloads failing due to rate limiting or source problems.
-Sharing in case anyone else has the same issue.
-Made in collaboration with AI.
+## Quick Start
 
-Tested and working on Suwayomi build: **v2.1.2019**
-
-## Installation
-
-### Prerequisites
-
-- Docker and Docker Compose installed
-- Suwayomi server running (either in Docker or standalone)
-- Access to Suwayomi's download folder
-
-### Quick Start
-
-1. **Clone this repository:**
+1. **Clone and navigate:**
    ```bash
-   git clone https://github.com/yourusername/Suwayomi-Fallback-Downloader.git
+   git clone https://github.com/Luskebusk/Suwayomi-Fallback-Downloader.git
    cd Suwayomi-Fallback-Downloader
    ```
 
-2. **Edit `docker-compose.yml`:**
-   
-   Update the following settings:
-   
-   ```yaml
-   environment:
-     SUWAYOMI_URL: "http://suwayomi:4567/api/graphql"  # Your Suwayomi URL
-     SUWAYOMI_USER: "username"  # Your Suwayomi username
-     SUWAYOMI_PASS: "password"  # Your Suwayomi password
-   
-   volumes:
-     - /path/to/your/suwayomi/downloads:/downloads/mangas  # Same path as Suwayomi
-   ```
+2. **Configure `docker-compose.yml`:**
+   - Set `SUWAYOMI_URL`, `SUWAYOMI_USER`, `SUWAYOMI_PASS`
+   - Update volume path to match your Suwayomi downloads
+   - Set `CHOWN_UID` and `CHOWN_GID` to your user/group IDs
 
-3. **Find your User/Group IDs** (for proper file permissions):
-   ```bash
-   id -u  # Your user ID
-   id -g  # Your group ID
-   ```
-   
-   Update `CHOWN_UID` and `CHOWN_GID` in `docker-compose.yml` with these values.
-
-4. **Start the container:**
+3. **Start the container:**
    ```bash
    docker-compose up -d
    ```
 
-5. **Check logs:**
+4. **Verify:**
    ```bash
    docker-compose logs -f
    ```
 
+**For detailed installation instructions, see the [Quick Start Guide](../../wiki/Quick-Start).**
+
 ## Configuration
 
-### Environment Variables
+All settings are configured via environment variables in `docker-compose.yml`. The script includes sensible defaults for most settings.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SUWAYOMI_URL` | `http://localhost:4567/api/graphql` | Suwayomi GraphQL API endpoint |
-| `SUWAYOMI_USER` | `username` | Suwayomi username (if auth enabled) |
-| `SUWAYOMI_PASS` | `password` | Suwayomi password (if auth enabled) |
-| `DOWNLOADS_PATH` | `/downloads/mangas` | Path to manga downloads folder |
-| `CHOWN_UID` | `1000` | User ID for file ownership |
-| `CHOWN_GID` | `1000` | Group ID for file ownership |
-| `CHECK_INTERVAL` | `60` | Seconds between queue checks |
+**Key configuration options:**
+- Connection settings (URL, authentication)
+- File system paths and permissions
+- Source priority (8 default sources included)
+- Parallel download limits
+- Custom filename patterns
 
-### Adding Custom Sources
+**For complete configuration documentation, see the [Configuration Guide](../../wiki/Configuration-Guide).**
 
-Edit `suwayomi_fallback_downloader.py` to add or reorder sources:
+## Common Issues
 
-1. **Add to Source Priority** (line ~35):
-   ```python
-   SOURCE_PRIORITY = [
-       "2499283573021220255",   # MangaDex (EN)
-       "YOUR_SOURCE_ID_HERE",   # Your Custom Source
-       # ... other sources
-   ]
-   ```
+- **Connection problems?** See [Networking Setup](../../wiki/Networking-Setup)
+- **Permission errors?** Check `CHOWN_UID` and `CHOWN_GID` in [Quick Start](../../wiki/Quick-Start)
+- **Files not found?** Verify volume mounts match Suwayomi's paths
+- **More issues?** Check the [Troubleshooting Guide](../../wiki/Troubleshooting)
 
-2. **Add Filename Pattern** (if needed, line ~50):
-   ```python
-   SOURCE_FILENAME_PATTERNS = {
-       "YOUR_SOURCE_ID_HERE": {
-           "prefix": "www.example.com_",  # Prefix for filenames
-           "transform": lambda name: name.replace(":", "_"),  # Name transformations
-       },
-   }
-   ```
+## License
 
-**Finding Source IDs:**
-- Open Suwayomi in your browser
-- Open Developer Tools (F12)
-- Navigate to a source
-- Check the Network tab for GraphQL requests containing the source ID
+MIT License - See [LICENSE](LICENSE) file for details.## About
 
-## Networking
+This was made mostly for personal use to solve persistent download failures due to rate limiting and source instability. Made in collaboration with AI.
 
-### If Suwayomi is in Docker:
+Tested and working on Suwayomi build: **v2.1.2019**
 
-Add both containers to the same network:
-
-```yaml
-networks:
-  - suwayomi_network
-
-networks:
-  suwayomi_network:
-    external: true
-```
-
-Or use the container name directly in `SUWAYOMI_URL` (e.g., `http://suwayomi:4567/api/graphql`).
-
-### If Suwayomi is on Host:
-
-Use `http://host.docker.internal:4567/api/graphql` (Docker Desktop) or your host's IP address.
-
-## Troubleshooting
-
-**Downloads not being detected:**
-- Ensure the Suwayomi URL is correct and accessible from the container
-- Verify authentication credentials if enabled
-- Check that the downloads path matches Suwayomi's configuration
-
-**File permission issues:**
-- Make sure `CHOWN_UID` and `CHOWN_GID` match your host user
-- Verify the volume mount has proper read/write permissions
-
-**No alternative sources found:**
-- Check that your manga exists on the configured sources
-- Adjust `TITLE_MATCH_THRESHOLD` if titles don't match exactly (default: 0.85)
+**Current Version:** v1.1.0 (includes parallel download support)
 
 ## License
 

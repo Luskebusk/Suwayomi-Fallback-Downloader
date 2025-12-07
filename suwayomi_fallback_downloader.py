@@ -32,7 +32,8 @@ CHOWN_GID = int(os.environ.get("CHOWN_GID", "1000"))  # Group ID for file owners
 # List of source IDs to try in order (most reliable first).
 # The script will attempt each source until a successful download is found.
 # To find source IDs: Check your Suwayomi source list or browser dev tools.
-SOURCE_PRIORITY = [
+# Can be overridden via SOURCE_PRIORITY env var (comma-separated list)
+_default_sources = [
     "2499283573021220255",   # MangaDex (EN)
     "6247824327199706550",   # Asura Scans (EN)
     "2528986671771677900",   # Mangakakalot (EN)
@@ -43,15 +44,13 @@ SOURCE_PRIORITY = [
     "4972933717624256217",   # Comick (EN)
 ]
 
+SOURCE_PRIORITY = os.environ.get("SOURCE_PRIORITY", "").split(",") if os.environ.get("SOURCE_PRIORITY") else _default_sources
+SOURCE_PRIORITY = [s.strip() for s in SOURCE_PRIORITY if s.strip()]  # Clean up whitespace
+
 # Filename Patterns per Source
 # Define how each source names its downloaded files.
-# Format: "source_id": {"prefix": "text_", "transform": function}
-# - prefix: Text added before the chapter name
-# - transform: Function to modify the chapter name (e.g., replace characters)
-#
-# Example: If a source prefixes files with "www.example.com_" and replaces colons,
-# add: "source_id": {"prefix": "www.example.com_", "transform": lambda name: name.replace(":", "_")}
-SOURCE_FILENAME_PATTERNS = {
+# Default patterns for known sources
+_default_patterns = {
     "4215511432986138970": {  # Mangabat
         "prefix": "www.mangabats.com_",
         "transform": lambda name: name,
@@ -65,6 +64,33 @@ SOURCE_FILENAME_PATTERNS = {
         "transform": lambda name: name,
     },
 }
+
+# Parse custom patterns from environment variable
+# Format: SOURCE_ID:PREFIX:TRANSFORM_TYPE,SOURCE_ID2:PREFIX2:TRANSFORM_TYPE2
+# TRANSFORM_TYPE can be: none, colon_to_underscore
+SOURCE_FILENAME_PATTERNS = _default_patterns.copy()
+custom_patterns = os.environ.get("SOURCE_FILENAME_PATTERNS", "")
+if custom_patterns:
+    for pattern_str in custom_patterns.split(","):
+        pattern_str = pattern_str.strip()
+        if not pattern_str:
+            continue
+        parts = pattern_str.split(":")
+        if len(parts) >= 2:
+            source_id = parts[0].strip()
+            prefix = parts[1].strip()
+            transform_type = parts[2].strip() if len(parts) > 2 else "none"
+            
+            # Define transform based on type
+            if transform_type == "colon_to_underscore":
+                transform = lambda name: name.replace(":", "_")
+            else:
+                transform = lambda name: name
+            
+            SOURCE_FILENAME_PATTERNS[source_id] = {
+                "prefix": prefix,
+                "transform": transform
+            }
 
 # Monitoring Settings
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))  # How often to check for failed downloads (seconds)
