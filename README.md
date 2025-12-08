@@ -81,5 +81,3 @@ MIT License - See [LICENSE](LICENSE) file for details.
 This was made mostly for personal use to solve persistent download failures due to rate limiting and source instability. Made in collaboration with AI.
 
 Tested and working on Suwayomi build: **v2.1.2019**
-
-**Current Version:** v1.1.0 (includes parallel download support)
